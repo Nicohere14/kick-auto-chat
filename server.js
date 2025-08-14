@@ -4,6 +4,7 @@ import bodyParser from "body-parser";
 import axios from "axios";
 import crypto from "crypto";
 import fs from "fs";
+import path from "path";
 
 /* ===== ENV ===== */
 const {
@@ -17,9 +18,18 @@ const {
   INTERVAL_MINUTES = "5",
   JITTER_SECONDS = "30,60",
   POLL_SECONDS = "120",
-  VERIFY_WEBHOOK_SIGNATURE = "false"
+  VERIFY_WEBHOOK_SIGNATURE = "false",
+  // poniższe do obsługi bez Shell'a
+  KICK_REFRESH_TOKEN = "",
+  ADMIN_KEY = "",
+  SUBSCRIBE_KEY = "",
+  DATA_DIR = ".", // ustaw np. /data gdy używasz persistent disk
 } = process.env;
 
+/* ===== Katalog na pliki ===== */
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+/* ===== Ustawienia interwałów ===== */
 const allowedSlugs = ALLOWED_SLUGS.split(",").map(s => s.trim()).filter(Boolean);
 const intervalMs = Math.max(1, Number(INTERVAL_MINUTES)) * 60_000;
 const [jMinRaw, jMaxRaw] = (JITTER_SECONDS || "30,60").split(",");
@@ -43,17 +53,21 @@ if (chatMessages.length === 0) chatMessages = [CHAT_MESSAGE];
 let msgIndex = 0;
 const nextMessage = () => chatMessages[(msgIndex++) % chatMessages.length];
 
-/* ===== Tokeny ===== */
-const TOKENS_FILE = "./tokens.json";
+/* ===== Tokeny i PKCE ===== */
+const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
 let tokens = fs.existsSync(TOKENS_FILE)
   ? JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"))
   : { access_token: null, refresh_token: null, expires_at: 0 };
 
+// Fallback: jeśli plik zniknął po redeployu, weź refresh z ENV
+if (!tokens.refresh_token && KICK_REFRESH_TOKEN) {
+  tokens.refresh_token = KICK_REFRESH_TOKEN.trim();
+}
+
 let appToken = { token: null, expires_at: 0 };
 const postingLoops = new Map(); // broadcaster_user_id -> controller
 
-/* ===== Trwałe PKCE (przeżywa restart) ===== */
-const PKCE_FILE = "./pkce.json";
+const PKCE_FILE = path.join(DATA_DIR, "pkce.json");
 let pkceStore = fs.existsSync(PKCE_FILE) ? JSON.parse(fs.readFileSync(PKCE_FILE, "utf-8")) : {};
 const savePkce = () => fs.writeFileSync(PKCE_FILE, JSON.stringify(pkceStore, null, 2));
 const setPkce = (state, verifier) => { pkceStore[state] = { verifier, ts: Date.now() }; savePkce(); };
@@ -67,7 +81,6 @@ const getPkce = (state) => {
 
 /* ===== App ===== */
 const app = express();
-// raw body potrzebny do weryfikacji podpisu webhooków
 app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(bodyParser.urlencoded({ extended: true, verify: (req, res, buf) => { req.rawBody = buf; } }));
 
@@ -76,14 +89,17 @@ async function refreshIfNeeded() {
   const now = Math.floor(Date.now() / 1000);
   if (tokens.access_token && now < Number(tokens.expires_at || 0) - 60) return tokens.access_token;
   if (!tokens.refresh_token) throw new Error("Brak refresh_token – uruchom /auth/start");
+
   const params = new URLSearchParams();
   params.append("grant_type", "refresh_token");
   params.append("client_id", KICK_CLIENT_ID);
   params.append("client_secret", KICK_CLIENT_SECRET);
   params.append("refresh_token", tokens.refresh_token);
+
   const { data } = await axios.post("https://id.kick.com/oauth/token", params, {
     headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000
   });
+
   tokens.access_token = data.access_token;
   tokens.refresh_token = data.refresh_token;
   tokens.expires_at = Math.floor(Date.now()/1000) + (data.expires_in || 3600);
@@ -94,20 +110,22 @@ async function refreshIfNeeded() {
 async function getAppToken() {
   const now = Math.floor(Date.now()/1000);
   if (appToken.token && now < Number(appToken.expires_at || 0) - 60) return appToken.token;
+
   const params = new URLSearchParams();
   params.append("grant_type", "client_credentials");
   params.append("client_id", KICK_CLIENT_ID);
   params.append("client_secret", KICK_CLIENT_SECRET);
+
   const { data } = await axios.post("https://id.kick.com/oauth/token", params, {
     headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000
   });
+
   appToken.token = data.access_token;
   appToken.expires_at = now + (data.expires_in || 3600);
   return appToken.token;
 }
 
 /* ===== API helpers ===== */
-// Uparty lookup kanału po slugu (ścieżka + różne warianty query)
 async function getChannelsBySlugs(slugs) {
   const list = (Array.isArray(slugs) ? slugs : [slugs])
     .map(s => String(s || "").trim())
@@ -120,7 +138,7 @@ async function getChannelsBySlugs(slugs) {
   const headers = { Authorization: `Bearer ${token}` };
   const timeout = 15000;
 
-  // 1) /public/v1/channels/{slug} — dla pojedynczego slugu
+  // 1) path /channels/{slug}
   if (list.length === 1) {
     const slug = encodeURIComponent(list[0]);
     try {
@@ -132,14 +150,14 @@ async function getChannelsBySlugs(slugs) {
     }
   }
 
-  // 2) query: powtarzane klucze ?slug=a&slug=b
+  // 2) query ?slug=a&slug=b
   try {
     const qs = list.map(s => `slug=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qs}`, { headers, timeout });
     if (Array.isArray(data?.data) && data.data.length) return data.data;
   } catch (_) {}
 
-  // 3) query: tablicowo ?slug[]=a&slug[]=b
+  // 3) query ?slug[]=a&slug[]=b
   try {
     const qsArr = list.map(s => `slug[]=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qsArr}`, { headers, timeout });
@@ -160,6 +178,7 @@ async function sendChatMessage({ broadcaster_user_id, content, type = "user" }) 
 function startPostingLoop(broadcaster_user_id, type = "user") {
   if (postingLoops.has(broadcaster_user_id)) return;
   let cancelled = false;
+
   const tick = async () => {
     if (cancelled) return;
     try {
@@ -175,11 +194,13 @@ function startPostingLoop(broadcaster_user_id, type = "user") {
       if (!cancelled) setTimeout(tick, intervalMs + jitterMs());
     }
   };
+
   const controller = { cancel: () => { cancelled = true; } };
   postingLoops.set(broadcaster_user_id, controller);
   setTimeout(tick, 10_000 + jitterMs());
   console.log("Posting loop START", broadcaster_user_id);
 }
+
 function stopPostingLoop(broadcaster_user_id) {
   const c = postingLoops.get(broadcaster_user_id);
   if (c) { c.cancel(); postingLoops.delete(broadcaster_user_id); console.log("Posting loop STOP", broadcaster_user_id); }
@@ -213,7 +234,8 @@ function verifyWebhookSignature(req) {
 }
 
 /* ===== ROUTES ===== */
-// webhook
+
+// webhook od Kick (start/stop pętli)
 app.post("/webhook", async (req, res) => {
   try {
     await getKickPublicKey();
@@ -233,7 +255,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// polling fallback
+// fallback: okresowe sprawdzanie LIVE
 async function pollingTick() {
   try {
     if (allowedSlugs.length === 0) return;
@@ -277,7 +299,7 @@ app.get("/callback", async (req, res) => {
     const params = new URLSearchParams({
       grant_type: "authorization_code",
       client_id: KICK_CLIENT_ID,
-      client_secret: KICK_CLIENT_SECRET, // OBOWIĄZKOWE
+      client_secret: KICK_CLIENT_SECRET,
       redirect_uri: KICK_REDIRECT_URI,
       code_verifier: codeVerifier,
       code: String(code)
@@ -300,7 +322,7 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-// subskrypcja eventów (webhook)
+// subskrypcja eventów (POST – właściwy)
 app.post("/subscribe", async (req, res) => {
   try {
     const token = await refreshIfNeeded();
@@ -310,13 +332,44 @@ app.post("/subscribe", async (req, res) => {
     }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
     res.json({ ok: true, created: data?.data || null });
   } catch (e) {
-    console.error("Subscribe error:", e.response?.data || e.message);
-    res.status(500).json({ ok: false, error: e.response?.data || e.message });
+    res.status(e?.response?.status || 500).json({ ok: false, error: e?.response?.data || e.message });
+  }
+});
+
+// opcjonalny GET-fallback do kliknięcia w przeglądarce (zabezpieczony kluczem)
+app.get("/subscribe", async (req, res) => {
+  try {
+    if (SUBSCRIBE_KEY) {
+      if (req.query.key !== SUBSCRIBE_KEY) return res.status(403).send("Forbidden");
+    } else {
+      return res.status(405).send("Use POST /subscribe or set SUBSCRIBE_KEY to enable GET.");
+    }
+    const token = await refreshIfNeeded();
+    const { data } = await axios.post("https://api.kick.com/public/v1/events/subscriptions", {
+      events: [{ name: "livestream.status.updated", version: 1 }],
+      method: "webhook"
+    }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
+    res.json({ ok: true, created: data?.data || null });
+  } catch (e) {
+    res.status(e?.response?.status || 500).json({ ok: false, error: e?.response?.data || e.message });
   }
 });
 
 // health
 app.get("/health", (req, res) => res.send("ok"));
+
+/* ===== ADMIN: jednorazowy podgląd refresh_token (z kluczem) ===== */
+app.get("/admin/peek-refresh", (req, res) => {
+  try {
+    if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).send("Forbidden");
+    if (!fs.existsSync(TOKENS_FILE)) return res.status(404).json({ error: "tokens.json not found" });
+    const raw = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"));
+    if (!raw?.refresh_token) return res.status(404).json({ error: "no refresh_token in file" });
+    res.json({ refresh_token: raw.refresh_token });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 /* ===== Boot ===== */
 app.listen(PORT, async () => {
