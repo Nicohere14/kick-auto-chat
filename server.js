@@ -8,6 +8,24 @@ import path from "path";
 import { io } from "socket.io-client";
 
 /* =========================
+ * UA / nagłówki „jak przeglądarka” (obchodzą 403)
+ * ========================= */
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+const JSON_HEADERS = {
+  "User-Agent": UA,
+  "Accept": "application/json, text/plain, */*",
+  "Referer": "https://kick.com/",
+};
+
+const HTML_HEADERS = {
+  "User-Agent": UA,
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Referer": "https://kick.com/",
+};
+
+/* =========================
  * ENV
  * ========================= */
 const {
@@ -58,14 +76,16 @@ const {
  * ========================= */
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
-const PKCE_FILE   = path.join(DATA_DIR, "pkce.json");
+const PKCE_FILE = path.join(DATA_DIR, "pkce.json");
 
 /* =========================
  * KONFIG
  * ========================= */
-const allowedSlugs = ALLOWED_SLUGS.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+const allowedSlugs = ALLOWED_SLUGS.split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
-const intervalMs   = Math.max(1, Number(INTERVAL_MINUTES)) * 60_000;
+const intervalMs = Math.max(1, Number(INTERVAL_MINUTES)) * 60_000;
 const [jMinRaw, jMaxRaw] = (JITTER_SECONDS || "30,60").split(",");
 const jMin = Math.abs(Number(jMinRaw || 30));
 const jMax = Math.abs(Number(jMaxRaw || 60));
@@ -75,14 +95,15 @@ const jitterMs = () =>
 const pollMs = Math.max(30, Number(POLL_SECONDS)) * 1000;
 
 /* =========================
- * ŁADOWANIE WIADOMOŚCI
- * (bez dopinania emotek/interpunkcji)
+ * WIADOMOŚCI (bez dopinek)
  * ========================= */
 function decodeB64Lines(b64) {
   try {
     const raw = Buffer.from(b64, "base64").toString("utf-8");
-    return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  } catch { return []; }
+    return raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 let baseMessages = [];
@@ -118,9 +139,9 @@ function shuffle(a) {
 
 function normalizeMsg(s) {
   let t = s.toLowerCase();
-  t = t.replace(/:[a-z0-9_]+:?/gi, "");       // np. :points
-  t = t.replace(/[^\p{L}\p{N}]+/gu, "");      // wszystko poza literą/cyfrą
-  t = t.replace(/(.)\1{2,}/g, "$1$1");        // xddddd -> xdd
+  t = t.replace(/:[a-z0-9_]+:?/gi, ""); // np. :points
+  t = t.replace(/[^\p{L}\p{N}]+/gu, ""); // wywal interpunkcję/emoji
+  t = t.replace(/(.)\1{2,}/g, "$1$1"); // xddddd -> xdd
   return t.trim();
 }
 
@@ -141,8 +162,8 @@ function variate(s) {
 }
 
 const noRepeatCount = Math.max(2, Number(MSG_NO_REPEAT_COUNT) || 8);
-const recentByChannel = new Map();  // id -> {list,set}
-const bagByChannel = new Map();     // id -> [msgs]
+const recentByChannel = new Map(); // id -> {list,set}
+const bagByChannel = new Map(); // id -> [msgs]
 
 function getRecent(id) {
   if (!recentByChannel.has(id)) recentByChannel.set(id, { list: [], set: new Set() });
@@ -173,7 +194,10 @@ function nextMessageFor(id) {
     const variant = variate(raw);
     const norm = normalizeMsg(variant);
     const mem = getRecent(id);
-    if (!mem.set.has(norm)) { remember(id, norm); return variant; }
+    if (!mem.set.has(norm)) {
+      remember(id, norm);
+      return variant;
+    }
   }
   const fallback = variate(baseMessages[Math.floor(Math.random() * baseMessages.length)]);
   remember(id, normalizeMsg(fallback));
@@ -188,19 +212,23 @@ const TOKENS_KV_KEY = "kick_tokens_v1";
 async function kvGet(key) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
   const r = await fetch(`${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` }
+    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
   });
   if (!r.ok) return null;
   const j = await r.json();
-  try { return j?.result ? JSON.parse(j.result) : null; } catch { return null; }
+  try {
+    return j?.result ? JSON.parse(j.result) : null;
+  } catch {
+    return null;
+  }
 }
 async function kvSet(key, obj) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return;
   const val = encodeURIComponent(JSON.stringify(obj));
   await fetch(`${UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/${val}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` }
-  }).catch(()=>{});
+    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+  }).catch(() => {});
 }
 
 /* =========================
@@ -209,12 +237,20 @@ async function kvSet(key, obj) {
 let tokens = { access_token: null, refresh_token: null, expires_at: 0 };
 
 function saveTokensToFile() {
-  try { fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2)); } catch {}
+  try {
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2));
+  } catch {}
 }
-async function saveTokensEverywhere() { saveTokensToFile(); await kvSet(TOKENS_KV_KEY, tokens); }
+async function saveTokensEverywhere() {
+  saveTokensToFile();
+  await kvSet(TOKENS_KV_KEY, tokens);
+}
 async function loadTokensOnBoot() {
   const fromKv = await kvGet(TOKENS_KV_KEY);
-  if (fromKv && fromKv.refresh_token) { tokens = fromKv; return; }
+  if (fromKv && fromKv.refresh_token) {
+    tokens = fromKv;
+    return;
+  }
   if (fs.existsSync(TOKENS_FILE)) {
     try {
       const f = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"));
@@ -228,46 +264,61 @@ async function loadTokensOnBoot() {
  * EXPRESS
  * ========================= */
 const app = express();
-app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
-app.use(bodyParser.urlencoded({ extended: true, verify: (req, res, buf) => { req.rawBody = buf; } }));
+app.use(
+  bodyParser.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+app.use(
+  bodyParser.urlencoded({
+    extended: true,
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 
 /* =========================
  * OAUTH HELPERS
  * ========================= */
 async function refreshIfNeeded() {
-  const now = Math.floor(Date.now()/1000);
+  const now = Math.floor(Date.now() / 1000);
   if (tokens.access_token && now < Number(tokens.expires_at || 0) - 60) return tokens.access_token;
   if (!tokens.refresh_token) throw new Error("Brak refresh_token – uruchom /auth/start");
 
   const params = new URLSearchParams();
-  params.append("grant_type","refresh_token");
-  params.append("client_id",KICK_CLIENT_ID);
-  params.append("client_secret",KICK_CLIENT_SECRET);
-  params.append("refresh_token",tokens.refresh_token);
+  params.append("grant_type", "refresh_token");
+  params.append("client_id", KICK_CLIENT_ID);
+  params.append("client_secret", KICK_CLIENT_SECRET);
+  params.append("refresh_token", tokens.refresh_token);
 
   const { data } = await axios.post("https://id.kick.com/oauth/token", params, {
-    headers: { "Content-Type":"application/x-www-form-urlencoded" }, timeout: 15000
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    timeout: 15000,
   });
 
-  tokens.access_token  = data.access_token;
+  tokens.access_token = data.access_token;
   tokens.refresh_token = data.refresh_token;
-  tokens.expires_at    = Math.floor(Date.now()/1000) + (data.expires_in || 3600);
+  tokens.expires_at = Math.floor(Date.now() / 1000) + (data.expires_in || 3600);
   await saveTokensEverywhere();
   return tokens.access_token;
 }
 
 let appToken = { token: null, expires_at: 0 };
 async function getAppToken() {
-  const now = Math.floor(Date.now()/1000);
+  const now = Math.floor(Date.now() / 1000);
   if (appToken.token && now < Number(appToken.expires_at || 0) - 60) return appToken.token;
 
   const params = new URLSearchParams();
-  params.append("grant_type","client_credentials");
-  params.append("client_id",KICK_CLIENT_ID);
-  params.append("client_secret",KICK_CLIENT_SECRET);
+  params.append("grant_type", "client_credentials");
+  params.append("client_id", KICK_CLIENT_ID);
+  params.append("client_secret", KICK_CLIENT_SECRET);
 
   const { data } = await axios.post("https://id.kick.com/oauth/token", params, {
-    headers: { "Content-Type":"application/x-www-form-urlencoded" }, timeout: 15000
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    timeout: 15000,
   });
 
   appToken.token = data.access_token;
@@ -281,14 +332,15 @@ async function getAppToken() {
 const channelIdCache = new Map(); // slug -> broadcaster_user_id
 
 async function getChannelsBySlugs(slugs) {
-  const list = (Array.isArray(slugs)? slugs : [slugs]).map(s=>String(s||"").trim().toLowerCase()).filter(Boolean);
+  const list = (Array.isArray(slugs) ? slugs : [slugs])
+    .map((s) => String(s || "").trim().toLowerCase())
+    .filter(Boolean);
   if (!list.length) return [];
   const token = await getAppToken();
   const base = "https://api.kick.com/public/v1/channels";
   const headers = { Authorization: `Bearer ${token}` };
   const timeout = 15000;
 
-  // single
   if (list.length === 1) {
     const slug = encodeURIComponent(list[0]);
     try {
@@ -298,12 +350,13 @@ async function getChannelsBySlugs(slugs) {
         channelIdCache.set(ch.slug || list[0], ch.broadcaster_user_id);
         return [ch];
       }
-    } catch (e) { if (e?.response?.status && e.response.status !== 404) throw e; }
+    } catch (e) {
+      if (e?.response?.status && e.response.status !== 404) throw e;
+    }
   }
 
-  // batch – try 2 styles
   try {
-    const qs = list.map(s => `slug=${encodeURIComponent(s)}`).join("&");
+    const qs = list.map((s) => `slug=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qs}`, { headers, timeout });
     if (Array.isArray(data?.data) && data.data.length) {
       for (const ch of data.data) channelIdCache.set(ch.slug, ch.broadcaster_user_id);
@@ -311,7 +364,7 @@ async function getChannelsBySlugs(slugs) {
     }
   } catch {}
   try {
-    const qs = list.map(s => `slug[]=${encodeURIComponent(s)}`).join("&");
+    const qs = list.map((s) => `slug[]=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qs}`, { headers, timeout });
     if (Array.isArray(data?.data) && data.data.length) {
       for (const ch of data.data) channelIdCache.set(ch.slug, ch.broadcaster_user_id);
@@ -321,11 +374,13 @@ async function getChannelsBySlugs(slugs) {
   return [];
 }
 
-async function sendChatMessage({ broadcaster_user_id, content, type="user" }) {
+async function sendChatMessage({ broadcaster_user_id, content, type = "user" }) {
   const token = await refreshIfNeeded();
-  await axios.post("https://api.kick.com/public/v1/chat", {
-    broadcaster_user_id, content, type
-  }, { headers: { Authorization:`Bearer ${token}` }, timeout: 15000 });
+  await axios.post(
+    "https://api.kick.com/public/v1/chat",
+    { broadcaster_user_id, content, type },
+    { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+  );
   markEchoSent(broadcaster_user_id, content);
 }
 
@@ -334,7 +389,7 @@ async function sendChatMessage({ broadcaster_user_id, content, type="user" }) {
  * ========================= */
 const postingLoops = new Map();
 
-function startPostingLoop(broadcaster_user_id, type="user") {
+function startPostingLoop(broadcaster_user_id, type = "user") {
   if (postingLoops.has(broadcaster_user_id)) return;
   let cancelled = false;
 
@@ -343,28 +398,43 @@ function startPostingLoop(broadcaster_user_id, type="user") {
     try {
       const msg = nextMessageFor(broadcaster_user_id);
       await sendChatMessage({ broadcaster_user_id, content: msg, type });
-      console.log(new Date().toISOString(), "sent { broadcaster_user_id:", broadcaster_user_id, ", msg: '", msg, "' }");
+      console.log(
+        new Date().toISOString(),
+        "sent { broadcaster_user_id:",
+        broadcaster_user_id,
+        ", msg: '",
+        msg,
+        "' }"
+      );
     } catch (e) {
       const status = e?.response?.status;
       const detail = e?.response?.data || e.message;
       console.error("Chat send error", status, detail);
-      if (status === 401 || status === 403) { stopPostingLoop(broadcaster_user_id); return; }
+      if (status === 401 || status === 403) {
+        stopPostingLoop(broadcaster_user_id);
+        return;
+      }
     } finally {
       if (!cancelled) setTimeout(tick, intervalMs + jitterMs());
     }
   };
 
-  postingLoops.set(broadcaster_user_id, { cancel: () => { cancelled = true; } });
+  postingLoops.set(broadcaster_user_id, { cancel: () => (cancelled = true) });
   setTimeout(tick, 10_000 + jitterMs());
   console.log("Posting loop START", broadcaster_user_id);
 
-  const slug = [...channelIdCache.entries()].find(([,id])=>id===broadcaster_user_id)?.[0]
-            || allowedSlugs.find(Boolean);
+  const slug =
+    [...channelIdCache.entries()].find(([, id]) => id === broadcaster_user_id)?.[0] ||
+    allowedSlugs.find(Boolean);
   if (slug) ensureWsListener(slug, broadcaster_user_id);
 }
 function stopPostingLoop(broadcaster_user_id) {
   const c = postingLoops.get(broadcaster_user_id);
-  if (c) { c.cancel(); postingLoops.delete(broadcaster_user_id); console.log("Posting loop STOP", broadcaster_user_id); }
+  if (c) {
+    c.cancel();
+    postingLoops.delete(broadcaster_user_id);
+    console.log("Posting loop STOP", broadcaster_user_id);
+  }
 }
 
 /* =========================
@@ -376,7 +446,9 @@ async function getKickPublicKey() {
   try {
     const { data } = await axios.get("https://api.kick.com/public/v1/public-key", { timeout: 15000 });
     cachedPublicKey = data?.data?.public_key || null;
-  } catch (e) { console.warn("Unable to fetch Kick public key:", e.message); }
+  } catch (e) {
+    console.warn("Unable to fetch Kick public key:", e.message);
+  }
   return cachedPublicKey;
 }
 function verifyWebhookSignature(req) {
@@ -391,23 +463,27 @@ function verifyWebhookSignature(req) {
     const pubKeyPem = cachedPublicKey;
     if (!pubKeyPem) return false;
     const verifier = crypto.createVerify("RSA-SHA256");
-    verifier.update(payload); verifier.end();
+    verifier.update(payload);
+    verifier.end();
     return verifier.verify(pubKeyPem, signature);
-  } catch (e) { console.error("Signature verify error:", e.message); return false; }
+  } catch (e) {
+    console.error("Signature verify error:", e.message);
+    return false;
+  }
 }
 
 /* =========================
  * ECHO SPAMU (WS)
  * ========================= */
-const echoEnabled   = String(CMD_ECHO_ENABLED).toLowerCase() === "true";
-const echoMinRun    = Math.max(2, Number(CMD_ECHO_MIN_RUN) || 5);
-const echoCooldownMs= Math.max(5, Number(CMD_ECHO_COOLDOWN_SECONDS) || 60) * 1000;
-const echoExclude   = new Set(
-  (CMD_ECHO_EXCLUDE || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+const echoEnabled = String(CMD_ECHO_ENABLED).toLowerCase() === "true";
+const echoMinRun = Math.max(2, Number(CMD_ECHO_MIN_RUN) || 5);
+const echoCooldownMs = Math.max(5, Number(CMD_ECHO_COOLDOWN_SECONDS) || 60) * 1000;
+const echoExclude = new Set(
+  (CMD_ECHO_EXCLUDE || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
 );
 
 const echoStateByChannel = new Map(); // id -> { current, count, lastSentAt }
-const echoRecentSent = new Map();     // id -> Map<content, ts>
+const echoRecentSent = new Map(); // id -> Map<content, ts>
 function markEchoSent(id, content) {
   const m = echoRecentSent.get(id) || new Map();
   m.set(content, Date.now());
@@ -418,7 +494,7 @@ function wasEchoSentRecently(id, content) {
   const m = echoRecentSent.get(id);
   if (!m) return false;
   const ts = m.get(content);
-  return Boolean(ts && (Date.now() - ts) < 30_000);
+  return Boolean(ts && Date.now() - ts < 30_000);
 }
 
 /* =========================
@@ -432,10 +508,11 @@ app.post("/webhook", async (req, res) => {
     const eventType = req.get("Kick-Event-Type");
     if (eventType === "livestream.status.updated") {
       const { broadcaster, is_live } = req.body || {};
-      const id   = broadcaster?.user_id;
+      const id = broadcaster?.user_id;
       const slug = String(broadcaster?.channel_slug || "").toLowerCase();
       if (id && allowedSlugs.includes(slug)) {
-        if (is_live) startPostingLoop(id); else stopPostingLoop(id);
+        if (is_live) startPostingLoop(id);
+        else stopPostingLoop(id);
       }
       return res.sendStatus(200);
     }
@@ -466,7 +543,9 @@ async function pollingTick() {
         stopPostingLoop(id);
       }
     }
-  } catch (e) { console.error("Polling error:", e.message); }
+  } catch (e) {
+    console.error("Polling error:", e.message);
+  }
 }
 
 /* =========================
@@ -489,7 +568,7 @@ app.get("/auth/start", (req, res) => {
     scope: "user:read channel:read chat:write events:subscribe",
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
-    state
+    state,
   });
   res.redirect(`https://id.kick.com/oauth/authorize?${params.toString()}`);
 });
@@ -499,7 +578,8 @@ app.get("/callback", async (req, res) => {
     const { code, state } = req.query;
     const store = fs.existsSync(PKCE_FILE) ? JSON.parse(fs.readFileSync(PKCE_FILE, "utf-8")) : {};
     const codeVerifier = state ? store[String(state)]?.verifier : null;
-    if (!code || !codeVerifier) return res.status(400).send("Brak code/code_verifier (uruchom /auth/start jeszcze raz).");
+    if (!code || !codeVerifier)
+      return res.status(400).send("Brak code/code_verifier (uruchom /auth/start jeszcze raz).");
 
     const params = new URLSearchParams({
       grant_type: "authorization_code",
@@ -507,16 +587,17 @@ app.get("/callback", async (req, res) => {
       client_secret: KICK_CLIENT_SECRET,
       redirect_uri: KICK_REDIRECT_URI,
       code_verifier: codeVerifier,
-      code: String(code)
+      code: String(code),
     });
 
     const { data } = await axios.post("https://id.kick.com/oauth/token", params, {
-      headers: { "Content-Type":"application/x-www-form-urlencoded" }, timeout: 15000
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      timeout: 15000,
     });
 
-    tokens.access_token  = data.access_token;
+    tokens.access_token = data.access_token;
     tokens.refresh_token = data.refresh_token;
-    tokens.expires_at    = Math.floor(Date.now()/1000) + (data.expires_in || 3600);
+    tokens.expires_at = Math.floor(Date.now() / 1000) + (data.expires_in || 3600);
     await saveTokensEverywhere();
 
     res.send("OK – tokeny zapisane. Możesz zamknąć kartę.");
@@ -532,13 +613,19 @@ app.get("/callback", async (req, res) => {
 app.post("/subscribe", async (req, res) => {
   try {
     const token = await refreshIfNeeded();
-    const { data } = await axios.post("https://api.kick.com/public/v1/events/subscriptions", {
-      events: [ { name: "livestream.status.updated", version: 1 } ],
-      method: "webhook"
-    }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
+    const { data } = await axios.post(
+      "https://api.kick.com/public/v1/events/subscriptions",
+      {
+        events: [{ name: "livestream.status.updated", version: 1 }],
+        method: "webhook",
+      },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+    );
     res.json({ ok: true, created: data?.data || null });
   } catch (e) {
-    res.status(e?.response?.status || 500).json({ ok: false, error: e?.response?.data || e.message });
+    res
+      .status(e?.response?.status || 500)
+      .json({ ok: false, error: e?.response?.data || e.message });
   }
 });
 
@@ -550,13 +637,19 @@ app.get("/subscribe", async (req, res) => {
       return res.status(405).send("Use POST /subscribe or set SUBSCRIBE_KEY to enable GET.");
     }
     const token = await refreshIfNeeded();
-    const { data } = await axios.post("https://api.kick.com/public/v1/events/subscriptions", {
-      events: [ { name: "livestream.status.updated", version: 1 } ],
-      method: "webhook"
-    }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
+    const { data } = await axios.post(
+      "https://api.kick.com/public/v1/events/subscriptions",
+      {
+        events: [{ name: "livestream.status.updated", version: 1 }],
+        method: "webhook",
+      },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+    );
     res.json({ ok: true, created: data?.data || null });
   } catch (e) {
-    res.status(e?.response?.status || 500).json({ ok: false, error: e?.response?.data || e.message });
+    res
+      .status(e?.response?.status || 500)
+      .json({ ok: false, error: e?.response?.data || e.message });
   }
 });
 
@@ -571,7 +664,7 @@ app.get("/admin/send", async (req, res) => {
     if (!ADMIN_KEY || key !== ADMIN_KEY) return res.status(403).send("Forbidden");
 
     const slug = String(req.query.slug || allowedSlugs[0] || "").toLowerCase();
-    const msg  = String(req.query.msg  || "TEST").substring(0, 280);
+    const msg = String(req.query.msg || "TEST").substring(0, 280);
     if (!slug) return res.status(400).json({ error: "Brak slug" });
     if (!allowedSlugs.includes(slug)) return res.status(403).json({ error: "Slug poza ALLOWED_SLUGS" });
 
@@ -582,7 +675,9 @@ app.get("/admin/send", async (req, res) => {
     await sendChatMessage({ broadcaster_user_id: id, content: msg, type: "user" });
     return res.json({ ok: true, sent_to: { slug, id }, msg });
   } catch (e) {
-    return res.status(e?.response?.status || 500).json({ ok: false, status: e?.response?.status, data: e?.response?.data || e.message });
+    return res
+      .status(e?.response?.status || 500)
+      .json({ ok: false, status: e?.response?.status, data: e?.response?.data || e.message });
   }
 });
 
@@ -590,29 +685,58 @@ app.get("/admin/peek-refresh", async (req, res) => {
   try {
     if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).send("Forbidden");
     return res.json({ refresh_token: tokens?.refresh_token || null });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* =========================
- * DIAGNOSTYKA CHATROOM
+ * DIAGNOSTYKA CHATROOM (z UA + HTML)
  * ========================= */
 app.get("/admin/debug-chatroom", async (req, res) => {
   try {
-    if (!ADMIN_KEY || (req.query.key !== ADMIN_KEY)) return res.status(403).send("Forbidden");
+    if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).send("Forbidden");
     const slug = String(req.query.slug || "").toLowerCase();
     if (!slug) return res.status(400).json({ error: "Brak slug" });
 
     const out = { slug };
-    try {
-      const { data } = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`, { timeout: 15000 });
-      out.v2_chatroom = data?.chatroom?.id ?? data?.data?.chatroom?.id ?? null;
-      out.v2_user_id  = data?.user_id ?? data?.data?.user_id ?? null;
-    } catch (e) { out.v2_error = e.message; }
 
     try {
-      const { data } = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chatroom`, { timeout: 15000 });
+      const { data } = await axios.get(
+        `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`,
+        { timeout: 15000, headers: JSON_HEADERS }
+      );
+      out.v2_chatroom = data?.chatroom?.id ?? data?.data?.chatroom?.id ?? null;
+      out.v2_user_id = data?.user_id ?? data?.data?.user_id ?? null;
+    } catch (e) {
+      out.v2_error = String(e?.response?.status || e.message);
+    }
+
+    try {
+      const { data } = await axios.get(
+        `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chatroom`,
+        { timeout: 15000, headers: JSON_HEADERS }
+      );
       out.endpoint_chatroom = data ?? null;
-    } catch (e) { out.endpoint_chatroom_error = e.message; }
+    } catch (e) {
+      out.endpoint_chatroom_error = String(e?.response?.status || e.message);
+    }
+
+    try {
+      const { data: html } = await axios.get(`https://kick.com/${encodeURIComponent(slug)}`, {
+        timeout: 15000,
+        headers: HTML_HEADERS,
+        responseType: "text",
+      });
+      let m = /"chatroom"\s*:\s*\{\s*"id"\s*:\s*(\d+)/.exec(html);
+      if (!m) m = /"chatroom_id"\s*:\s*(\d+)/.exec(html);
+      out.html_chatroom = m ? Number(m[1]) : null;
+
+      const u = /"user_id"\s*:\s*(\d+)/.exec(html);
+      out.html_user_id = u ? Number(u[1]) : null;
+    } catch (e) {
+      out.html_error = String(e?.response?.status || e.message);
+    }
 
     res.json(out);
   } catch (e) {
@@ -621,7 +745,7 @@ app.get("/admin/debug-chatroom", async (req, res) => {
 });
 
 /* =========================
- * WS CZATU – pobieranie chatroom_id (fallback + regex)
+ * WS CZATU – pobieranie chatroom_id (UA + regex + HTML)
  * ========================= */
 const wsBySlug = new Map();
 const missingChatLogOnce = new Set();
@@ -636,44 +760,63 @@ async function getChannelWithChatroom(slug) {
     chatroom_id = ch?.chatroom?.id ?? ch?.chatroom_id ?? null;
   } catch {}
 
-  // 2) frontowy endpoint – JSON
+  // 2) frontowy endpoint JSON – z UA
   if (!chatroom_id) {
     try {
       const { data } = await axios.get(
         `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`,
-        { timeout: 15000 }
+        { timeout: 15000, headers: JSON_HEADERS }
       );
       chatroom_id = data?.chatroom?.id ?? data?.data?.chatroom?.id ?? null;
       if (!ch && data) {
-        ch = { slug, broadcaster_user_id: data?.user_id ?? data?.data?.user_id ?? channelIdCache.get(slug) ?? null };
+        ch = {
+          slug,
+          broadcaster_user_id:
+            data?.user_id ?? data?.data?.user_id ?? channelIdCache.get(slug) ?? null,
+        };
       }
     } catch {}
   }
 
-  // 3) ten sam endpoint jako TEXT + regex (szukamy "chatroom":{"id":123} albo "chatroom_id":123)
+  // 3) ten sam endpoint jako TEXT + regex – z UA
   if (!chatroom_id) {
     try {
       const { data: raw } = await axios.get(
         `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`,
-        { timeout: 15000, responseType: "text" }
+        { timeout: 15000, headers: HTML_HEADERS, responseType: "text" }
       );
-      const m1 = /"chatroom"\s*:\s*\{\s*"id"\s*:\s*(\d+)/.exec(raw);
-      if (m1) chatroom_id = Number(m1[1]);
-      if (!chatroom_id) {
-        const m2 = /"chatroom_id"\s*:\s*(\d+)/.exec(raw);
-        if (m2) chatroom_id = Number(m2[1]);
-      }
+      let m = /"chatroom"\s*:\s*\{\s*"id"\s*:\s*(\d+)/.exec(raw);
+      if (!m) m = /"chatroom_id"\s*:\s*(\d+)/.exec(raw);
+      if (m) chatroom_id = Number(m[1]);
     } catch {}
   }
 
-  // 4) osobny endpoint /chatroom
+  // 4) osobny endpoint /chatroom – z UA
   if (!chatroom_id) {
     try {
       const { data } = await axios.get(
         `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chatroom`,
-        { timeout: 15000 }
+        { timeout: 15000, headers: JSON_HEADERS }
       );
       chatroom_id = data?.id ?? null;
+    } catch {}
+  }
+
+  // 5) fallback: HTML kanału – regex + user_id
+  if (!chatroom_id) {
+    try {
+      const { data: html } = await axios.get(`https://kick.com/${encodeURIComponent(slug)}`, {
+        timeout: 15000,
+        headers: HTML_HEADERS,
+        responseType: "text",
+      });
+      let m = /"chatroom"\s*:\s*\{\s*"id"\s*:\s*(\d+)/.exec(html);
+      if (!m) m = /"chatroom_id"\s*:\s*(\d+)/.exec(html);
+      if (m) chatroom_id = Number(m[1]);
+      if (!ch) {
+        const u = /"user_id"\s*:\s*(\d+)/.exec(html);
+        ch = { slug, broadcaster_user_id: u ? Number(u[1]) : channelIdCache.get(slug) ?? null };
+      }
     } catch {}
   }
 
@@ -685,60 +828,71 @@ function ensureWsListener(slugRaw, broadcaster_user_id) {
   const slug = String(slugRaw || "").toLowerCase();
   if (wsBySlug.has(slug)) return;
 
-  getChannelWithChatroom(slug).then(({ chatroom_id }) => {
-    if (!chatroom_id) {
-      if (!missingChatLogOnce.has(slug)) {
-        console.warn(`Brak chatroom_id dla ${slug}`);
-        missingChatLogOnce.add(slug);
-      }
-      setTimeout(() => { wsBySlug.delete(slug); ensureWsListener(slug, broadcaster_user_id); }, 60_000);
-      return;
-    }
-
-    const socket = io("https://chat.kick.com", {
-      transports: ["websocket"],
-      forceNew: true,
-      reconnection: true,
-      reconnectionDelayMax: 15000,
-    });
-    wsBySlug.set(slug, socket);
-
-    socket.on("connect", () => {
-      try { socket.emit("SUBSCRIBE", { room: `chatrooms:${chatroom_id}` }); } catch {}
-      console.log(`WS connected for ${slug} (chatrooms:${chatroom_id})`);
-    });
-
-    socket.on("disconnect", () => console.log(`WS disconnected for ${slug}`));
-
-    const onMsg = async (payload) => {
-      try {
-        const raw = payload?.content ?? payload?.message?.content ?? "";
-        const content = String(raw || "").trim();
-        if (!content) return;
-
-        const lower = content.toLowerCase();
-        if (!lower.startsWith("!")) return;
-        if (echoExclude.has(lower)) return;
-        if (wasEchoSentRecently(broadcaster_user_id, content)) return;
-
-        const st = echoStateByChannel.get(broadcaster_user_id) || { current: "", count: 0, lastSentAt: 0 };
-        if (st.current === lower) st.count += 1; else { st.current = lower; st.count = 1; }
-
-        const now = Date.now();
-        if (st.count >= echoMinRun && (now - st.lastSentAt) > echoCooldownMs) {
-          try {
-            await sendChatMessage({ broadcaster_user_id, content, type: "user" });
-            st.lastSentAt = now;
-            st.count = 0;
-          } catch {}
+  getChannelWithChatroom(slug)
+    .then(({ chatroom_id }) => {
+      if (!chatroom_id) {
+        if (!missingChatLogOnce.has(slug)) {
+          console.warn(`Brak chatroom_id dla ${slug}`);
+          missingChatLogOnce.add(slug);
         }
-        echoStateByChannel.set(broadcaster_user_id, st);
-      } catch {}
-    };
+        setTimeout(() => {
+          wsBySlug.delete(slug);
+          ensureWsListener(slug, broadcaster_user_id);
+        }, 60_000);
+        return;
+      }
 
-    socket.on("message", onMsg);
-    socket.on("chat_message", onMsg);
-  }).catch(()=>{});
+      const socket = io("https://chat.kick.com", {
+        transports: ["websocket"],
+        forceNew: true,
+        reconnection: true,
+        reconnectionDelayMax: 15000,
+      });
+      wsBySlug.set(slug, socket);
+
+      socket.on("connect", () => {
+        try {
+          socket.emit("SUBSCRIBE", { room: `chatrooms:${chatroom_id}` });
+        } catch {}
+        console.log(`WS connected for ${slug} (chatrooms:${chatroom_id})`);
+      });
+
+      socket.on("disconnect", () => console.log(`WS disconnected for ${slug}`));
+
+      const onMsg = async (payload) => {
+        try {
+          const raw = payload?.content ?? payload?.message?.content ?? "";
+          const content = String(raw || "").trim();
+          if (!content) return;
+
+          const lower = content.toLowerCase();
+          if (!lower.startsWith("!")) return;
+          if (echoExclude.has(lower)) return;
+          if (wasEchoSentRecently(broadcaster_user_id, content)) return;
+
+          const st = echoStateByChannel.get(broadcaster_user_id) || { current: "", count: 0, lastSentAt: 0 };
+          if (st.current === lower) st.count += 1;
+          else {
+            st.current = lower;
+            st.count = 1;
+          }
+
+          const now = Date.now();
+          if (st.count >= echoMinRun && now - st.lastSentAt > echoCooldownMs) {
+            try {
+              await sendChatMessage({ broadcaster_user_id, content, type: "user" });
+              st.lastSentAt = now;
+              st.count = 0;
+            } catch {}
+          }
+          echoStateByChannel.set(broadcaster_user_id, st);
+        } catch {}
+      };
+
+      socket.on("message", onMsg);
+      socket.on("chat_message", onMsg);
+    })
+    .catch(() => {});
 }
 
 /* =========================
