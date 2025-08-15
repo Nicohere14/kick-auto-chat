@@ -7,7 +7,9 @@ import fs from "fs";
 import path from "path";
 import { io } from "socket.io-client";
 
-/* ========= ENV ========= */
+/* =========================
+ * ENV
+ * ========================= */
 const {
   PORT = 3000,
 
@@ -17,120 +19,172 @@ const {
 
   ALLOWED_SLUGS = "",
 
+  // Wiadomości (jedna lub lista)
   CHAT_MESSAGE = "Cześć czacie!",
   CHAT_MESSAGES_JSON = "",
   CHAT_MESSAGES_B64 = "",
   MSG_NO_REPEAT_COUNT = "8",
 
+  // Harmonogram
   INTERVAL_MINUTES = "5",
   JITTER_SECONDS = "30,60",
   POLL_SECONDS = "60",
 
+  // Webhook security
   VERIFY_WEBHOOK_SIGNATURE = "false",
 
+  // Admin / pomocnicze
   ADMIN_KEY = "",
   SUBSCRIBE_KEY = "",
 
   DATA_DIR = ".",
 
+  // KV (opcjonalnie)
   UPSTASH_REDIS_REST_URL = "",
   UPSTASH_REDIS_REST_TOKEN = "",
 
+  // Awaryjny refresh z ENV (opcjonalnie)
   KICK_REFRESH_TOKEN = "",
 
-  // echo spamu
+  // Echo spamu (WS)
   CMD_ECHO_ENABLED = "true",
   CMD_ECHO_MIN_RUN = "5",
   CMD_ECHO_COOLDOWN_SECONDS = "60",
   CMD_ECHO_EXCLUDE = "!points",
 } = process.env;
 
-/* ========= Storage ========= */
+/* =========================
+ * STORAGE
+ * ========================= */
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
 const PKCE_FILE   = path.join(DATA_DIR, "pkce.json");
 
-/* ========= Konfiguracja ========= */
+/* =========================
+ * KONFIG
+ * ========================= */
 const allowedSlugs = ALLOWED_SLUGS.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
 const intervalMs   = Math.max(1, Number(INTERVAL_MINUTES)) * 60_000;
 const [jMinRaw, jMaxRaw] = (JITTER_SECONDS || "30,60").split(",");
 const jMin = Math.abs(Number(jMinRaw || 30));
 const jMax = Math.abs(Number(jMaxRaw || 60));
 const jitterMs = () =>
   (Math.floor(Math.random() * (Math.max(jMin, jMax) - Math.min(jMin, jMax) + 1)) + Math.min(jMin, jMax)) * 1000;
+
 const pollMs = Math.max(30, Number(POLL_SECONDS)) * 1000;
 
-/* ========= Wiadomości (bez dopinania interpunkcji/emoji) ========= */
+/* =========================
+ * ŁADOWANIE WIADOMOŚCI
+ * (bez dopinania emotek/interpunkcji)
+ * ========================= */
 function decodeB64Lines(b64) {
   try {
     const raw = Buffer.from(b64, "base64").toString("utf-8");
     return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   } catch { return []; }
 }
+
 let baseMessages = [];
 let source = "CHAT_MESSAGE";
-if (CHAT_MESSAGES_B64) { baseMessages = decodeB64Lines(CHAT_MESSAGES_B64); source = "CHAT_MESSAGES_B64"; }
+
+if (CHAT_MESSAGES_B64) {
+  baseMessages = decodeB64Lines(CHAT_MESSAGES_B64);
+  source = "CHAT_MESSAGES_B64";
+}
 if (!baseMessages.length && CHAT_MESSAGES_JSON) {
   try {
     const arr = JSON.parse(CHAT_MESSAGES_JSON);
-    if (Array.isArray(arr) && arr.length) { baseMessages = arr.map(String); source = "CHAT_MESSAGES_JSON"; }
-  } catch { console.warn("CHAT_MESSAGES_JSON parse error – pomijam."); }
+    if (Array.isArray(arr) && arr.length) {
+      baseMessages = arr.map(String);
+      source = "CHAT_MESSAGES_JSON";
+    }
+  } catch {
+    console.warn("CHAT_MESSAGES_JSON parse error – pomijam.");
+  }
 }
 if (!baseMessages.length) baseMessages = [String(CHAT_MESSAGE)];
+
 console.log(`Loaded ${baseMessages.length} messages from ${source}`);
 
-function shuffle(a){const r=a.slice();for(let i=r.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[r[i],r[j]]=[r[j],r[i]];}return r;}
-function normalizeMsg(s){
-  let t=s.toLowerCase();
-  t=t.replace(/[:][a-z0-9_]+:?/gi,"");   // emotes w stylu :points
-  t=t.replace(/[^\p{L}\p{N}]+/gu,"");    // wszystko poza literami/cyframi
-  t=t.replace(/(.)\1{2,}/g,"$1$1");      // xddddd -> xdd
+function shuffle(a) {
+  const r = a.slice();
+  for (let i = r.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [r[i], r[j]] = [r[j], r[i]];
+  }
+  return r;
+}
+
+function normalizeMsg(s) {
+  let t = s.toLowerCase();
+  t = t.replace(/:[a-z0-9_]+:?/gi, "");       // np. :points
+  t = t.replace(/[^\p{L}\p{N}]+/gu, "");      // wszystko poza literą/cyfrą
+  t = t.replace(/(.)\1{2,}/g, "$1$1");        // xddddd -> xdd
   return t.trim();
 }
-const tinySyn=new Map([
-  ["xd",["xd","xD","XD","XDD"]],
-  ["gg",["gg","GG"]],
-  ["wp",["wp","WP"]],
-  ["kekw",["KEKW","kekw"]],
+
+const tinySyn = new Map([
+  ["xd", ["xd", "xD", "XD", "XDD"]],
+  ["gg", ["gg", "GG"]],
+  ["wp", ["wp", "WP"]],
+  ["kekw", ["KEKW", "kekw"]],
 ]);
-function variate(s){
-  const key=normalizeMsg(s);
-  if(tinySyn.has(key)){
-    const arr=tinySyn.get(key);
-    return arr[Math.floor(Math.random()*arr.length)];
+
+function variate(s) {
+  const key = normalizeMsg(s);
+  if (tinySyn.has(key)) {
+    const arr = tinySyn.get(key);
+    return arr[Math.floor(Math.random() * arr.length)];
   }
   return s;
 }
-const noRepeatCount=Math.max(2,Number(MSG_NO_REPEAT_COUNT)||8);
-const recentByChannel=new Map();  // id -> {list,set}
-const bagByChannel=new Map();     // id -> [msgs]
-function getRecent(id){ if(!recentByChannel.has(id)) recentByChannel.set(id,{list:[],set:new Set()}); return recentByChannel.get(id); }
-function remember(id,norm){
-  const mem=getRecent(id);
-  if(!mem.set.has(norm)){ mem.list.push(norm); mem.set.add(norm);
-    while(mem.list.length>noRepeatCount){ const old=mem.list.shift(); mem.set.delete(old); }
+
+const noRepeatCount = Math.max(2, Number(MSG_NO_REPEAT_COUNT) || 8);
+const recentByChannel = new Map();  // id -> {list,set}
+const bagByChannel = new Map();     // id -> [msgs]
+
+function getRecent(id) {
+  if (!recentByChannel.has(id)) recentByChannel.set(id, { list: [], set: new Set() });
+  return recentByChannel.get(id);
+}
+function remember(id, norm) {
+  const mem = getRecent(id);
+  if (!mem.set.has(norm)) {
+    mem.list.push(norm);
+    mem.set.add(norm);
+    while (mem.list.length > noRepeatCount) {
+      const old = mem.list.shift();
+      mem.set.delete(old);
+    }
   }
 }
-function nextFromBag(id){
-  let bag=bagByChannel.get(id);
-  if(!bag || !bag.length){ bag=shuffle(baseMessages); bagByChannel.set(id,bag); }
+function nextFromBag(id) {
+  let bag = bagByChannel.get(id);
+  if (!bag || !bag.length) {
+    bag = shuffle(baseMessages);
+    bagByChannel.set(id, bag);
+  }
   return bag.shift();
 }
-function nextMessageFor(id){
-  for(let i=0;i<baseMessages.length+3;i++){
-    const raw=nextFromBag(id) || baseMessages[Math.floor(Math.random()*baseMessages.length)];
-    const variant=variate(raw);
-    const norm=normalizeMsg(variant);
-    const mem=getRecent(id);
-    if(!mem.set.has(norm)){ remember(id,norm); return variant; }
+function nextMessageFor(id) {
+  for (let i = 0; i < baseMessages.length + 3; i++) {
+    const raw = nextFromBag(id) || baseMessages[Math.floor(Math.random() * baseMessages.length)];
+    const variant = variate(raw);
+    const norm = normalizeMsg(variant);
+    const mem = getRecent(id);
+    if (!mem.set.has(norm)) { remember(id, norm); return variant; }
   }
-  const fallback=variate(baseMessages[Math.floor(Math.random()*baseMessages.length)]);
-  remember(id,normalizeMsg(fallback));
+  const fallback = variate(baseMessages[Math.floor(Math.random() * baseMessages.length)]);
+  remember(id, normalizeMsg(fallback));
   return fallback;
 }
 
-/* ========= KV (Upstash) ========= */
+/* =========================
+ * KV (Upstash) – opcjonalnie
+ * ========================= */
 const TOKENS_KV_KEY = "kick_tokens_v1";
+
 async function kvGet(key) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
   const r = await fetch(`${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
@@ -149,25 +203,37 @@ async function kvSet(key, obj) {
   }).catch(()=>{});
 }
 
-/* ========= Tokeny ========= */
+/* =========================
+ * TOKENY
+ * ========================= */
 let tokens = { access_token: null, refresh_token: null, expires_at: 0 };
-function saveTokensToFile(){ try { fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2)); } catch {} }
-async function saveTokensEverywhere(){ saveTokensToFile(); await kvSet(TOKENS_KV_KEY, tokens); }
-async function loadTokensOnBoot(){
+
+function saveTokensToFile() {
+  try { fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2)); } catch {}
+}
+async function saveTokensEverywhere() { saveTokensToFile(); await kvSet(TOKENS_KV_KEY, tokens); }
+async function loadTokensOnBoot() {
   const fromKv = await kvGet(TOKENS_KV_KEY);
   if (fromKv && fromKv.refresh_token) { tokens = fromKv; return; }
   if (fs.existsSync(TOKENS_FILE)) {
-    try { const f = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8")); if (f?.refresh_token) tokens = f; } catch {}
+    try {
+      const f = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"));
+      if (f?.refresh_token) tokens = f;
+    } catch {}
   }
   if (!tokens.refresh_token && KICK_REFRESH_TOKEN) tokens.refresh_token = KICK_REFRESH_TOKEN.trim();
 }
 
-/* ========= Express ========= */
+/* =========================
+ * EXPRESS
+ * ========================= */
 const app = express();
 app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(bodyParser.urlencoded({ extended: true, verify: (req, res, buf) => { req.rawBody = buf; } }));
 
-/* ========= OAuth helpers ========= */
+/* =========================
+ * OAUTH HELPERS
+ * ========================= */
 async function refreshIfNeeded() {
   const now = Math.floor(Date.now()/1000);
   if (tokens.access_token && now < Number(tokens.expires_at || 0) - 60) return tokens.access_token;
@@ -191,7 +257,7 @@ async function refreshIfNeeded() {
 }
 
 let appToken = { token: null, expires_at: 0 };
-async function getAppToken(){
+async function getAppToken() {
   const now = Math.floor(Date.now()/1000);
   if (appToken.token && now < Number(appToken.expires_at || 0) - 60) return appToken.token;
 
@@ -209,7 +275,9 @@ async function getAppToken(){
   return appToken.token;
 }
 
-/* ========= API helpers ========= */
+/* =========================
+ * API HELPERS
+ * ========================= */
 const channelIdCache = new Map(); // slug -> broadcaster_user_id
 
 async function getChannelsBySlugs(slugs) {
@@ -233,7 +301,7 @@ async function getChannelsBySlugs(slugs) {
     } catch (e) { if (e?.response?.status && e.response.status !== 404) throw e; }
   }
 
-  // batch – różne warianty
+  // batch – try 2 styles
   try {
     const qs = list.map(s => `slug=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qs}`, { headers, timeout });
@@ -261,18 +329,21 @@ async function sendChatMessage({ broadcaster_user_id, content, type="user" }) {
   markEchoSent(broadcaster_user_id, content);
 }
 
-/* ========= Pętla wysyłek ========= */
+/* =========================
+ * PĘTLA WIADOMOŚCI
+ * ========================= */
 const postingLoops = new Map();
-function startPostingLoop(broadcaster_user_id, type="user"){
+
+function startPostingLoop(broadcaster_user_id, type="user") {
   if (postingLoops.has(broadcaster_user_id)) return;
-  let cancelled=false;
+  let cancelled = false;
 
   const tick = async () => {
     if (cancelled) return;
     try {
       const msg = nextMessageFor(broadcaster_user_id);
       await sendChatMessage({ broadcaster_user_id, content: msg, type });
-      console.log(new Date().toISOString(), "sent", { broadcaster_user_id, msg });
+      console.log(new Date().toISOString(), "sent { broadcaster_user_id:", broadcaster_user_id, ", msg: '", msg, "' }");
     } catch (e) {
       const status = e?.response?.status;
       const detail = e?.response?.data || e.message;
@@ -287,17 +358,18 @@ function startPostingLoop(broadcaster_user_id, type="user"){
   setTimeout(tick, 10_000 + jitterMs());
   console.log("Posting loop START", broadcaster_user_id);
 
-  // spróbuj powiązać slug i uruchomić nasłuch WS
   const slug = [...channelIdCache.entries()].find(([,id])=>id===broadcaster_user_id)?.[0]
             || allowedSlugs.find(Boolean);
   if (slug) ensureWsListener(slug, broadcaster_user_id);
 }
-function stopPostingLoop(broadcaster_user_id){
+function stopPostingLoop(broadcaster_user_id) {
   const c = postingLoops.get(broadcaster_user_id);
   if (c) { c.cancel(); postingLoops.delete(broadcaster_user_id); console.log("Posting loop STOP", broadcaster_user_id); }
 }
 
-/* ========= Webhook security (opcjonalne) ========= */
+/* =========================
+ * WEBHOOK SECURITY (opcjonalne)
+ * ========================= */
 let cachedPublicKey = null;
 async function getKickPublicKey() {
   if (cachedPublicKey) return cachedPublicKey;
@@ -324,11 +396,13 @@ function verifyWebhookSignature(req) {
   } catch (e) { console.error("Signature verify error:", e.message); return false; }
 }
 
-/* ========= Echo spamu ========= */
-const echoEnabled = String(CMD_ECHO_ENABLED).toLowerCase() === "true";
-const echoMinRun  = Math.max(2, Number(CMD_ECHO_MIN_RUN) || 5);
-const echoCooldownMs = Math.max(5, Number(CMD_ECHO_COOLDOWN_SECONDS) || 60) * 1000;
-const echoExclude = new Set(
+/* =========================
+ * ECHO SPAMU (WS)
+ * ========================= */
+const echoEnabled   = String(CMD_ECHO_ENABLED).toLowerCase() === "true";
+const echoMinRun    = Math.max(2, Number(CMD_ECHO_MIN_RUN) || 5);
+const echoCooldownMs= Math.max(5, Number(CMD_ECHO_COOLDOWN_SECONDS) || 60) * 1000;
+const echoExclude   = new Set(
   (CMD_ECHO_EXCLUDE || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
 );
 
@@ -344,10 +418,12 @@ function wasEchoSentRecently(id, content) {
   const m = echoRecentSent.get(id);
   if (!m) return false;
   const ts = m.get(content);
-  return ts && (Date.now() - ts) < 30_000;
+  return Boolean(ts && (Date.now() - ts) < 30_000);
 }
 
-/* ========= Webhook (tylko LIVE on/off) ========= */
+/* =========================
+ * WEBHOOK (tylko LIVE on/off)
+ * ========================= */
 app.post("/webhook", async (req, res) => {
   try {
     await getKickPublicKey();
@@ -371,7 +447,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* ========= Polling fallback ========= */
+/* =========================
+ * POLLING LIVE – fallback
+ * ========================= */
 async function pollingTick() {
   try {
     if (!allowedSlugs.length) return;
@@ -391,7 +469,9 @@ async function pollingTick() {
   } catch (e) { console.error("Polling error:", e.message); }
 }
 
-/* ========= OAuth ========= */
+/* =========================
+ * OAUTH FLOW
+ * ========================= */
 app.get("/auth/start", (req, res) => {
   if (!KICK_CLIENT_ID || !KICK_REDIRECT_URI) return res.status(400).send("Missing OAuth envs");
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
@@ -446,7 +526,9 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-/* ========= Subskrypcja (tylko LIVE) ========= */
+/* =========================
+ * SUBSKRYPCJA (tylko LIVE)
+ * ========================= */
 app.post("/subscribe", async (req, res) => {
   try {
     const token = await refreshIfNeeded();
@@ -478,7 +560,9 @@ app.get("/subscribe", async (req, res) => {
   }
 });
 
-/* ========= Health & Admin ========= */
+/* =========================
+ * HEALTH & ADMIN
+ * ========================= */
 app.get("/health", (req, res) => res.send("ok"));
 
 app.get("/admin/send", async (req, res) => {
@@ -509,7 +593,36 @@ app.get("/admin/peek-refresh", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ========= WS czatu: fallback na różne endpointy ========= */
+/* =========================
+ * DIAGNOSTYKA CHATROOM
+ * ========================= */
+app.get("/admin/debug-chatroom", async (req, res) => {
+  try {
+    if (!ADMIN_KEY || (req.query.key !== ADMIN_KEY)) return res.status(403).send("Forbidden");
+    const slug = String(req.query.slug || "").toLowerCase();
+    if (!slug) return res.status(400).json({ error: "Brak slug" });
+
+    const out = { slug };
+    try {
+      const { data } = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`, { timeout: 15000 });
+      out.v2_chatroom = data?.chatroom?.id ?? data?.data?.chatroom?.id ?? null;
+      out.v2_user_id  = data?.user_id ?? data?.data?.user_id ?? null;
+    } catch (e) { out.v2_error = e.message; }
+
+    try {
+      const { data } = await axios.get(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/chatroom`, { timeout: 15000 });
+      out.endpoint_chatroom = data ?? null;
+    } catch (e) { out.endpoint_chatroom_error = e.message; }
+
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================
+ * WS CZATU – pobieranie chatroom_id (fallback + regex)
+ * ========================= */
 const wsBySlug = new Map();
 const missingChatLogOnce = new Set();
 
@@ -523,7 +636,7 @@ async function getChannelWithChatroom(slug) {
     chatroom_id = ch?.chatroom?.id ?? ch?.chatroom_id ?? null;
   } catch {}
 
-  // 2) frontowy endpoint – zwykle zwraca chatroom.id
+  // 2) frontowy endpoint – JSON
   if (!chatroom_id) {
     try {
       const { data } = await axios.get(
@@ -537,7 +650,23 @@ async function getChannelWithChatroom(slug) {
     } catch {}
   }
 
-  // 3) awaryjny
+  // 3) ten sam endpoint jako TEXT + regex (szukamy "chatroom":{"id":123} albo "chatroom_id":123)
+  if (!chatroom_id) {
+    try {
+      const { data: raw } = await axios.get(
+        `https://kick.com/api/v2/channels/${encodeURIComponent(slug)}`,
+        { timeout: 15000, responseType: "text" }
+      );
+      const m1 = /"chatroom"\s*:\s*\{\s*"id"\s*:\s*(\d+)/.exec(raw);
+      if (m1) chatroom_id = Number(m1[1]);
+      if (!chatroom_id) {
+        const m2 = /"chatroom_id"\s*:\s*(\d+)/.exec(raw);
+        if (m2) chatroom_id = Number(m2[1]);
+      }
+    } catch {}
+  }
+
+  // 4) osobny endpoint /chatroom
   if (!chatroom_id) {
     try {
       const { data } = await axios.get(
@@ -562,7 +691,6 @@ function ensureWsListener(slugRaw, broadcaster_user_id) {
         console.warn(`Brak chatroom_id dla ${slug}`);
         missingChatLogOnce.add(slug);
       }
-      // spróbuj ponownie za 60s
       setTimeout(() => { wsBySlug.delete(slug); ensureWsListener(slug, broadcaster_user_id); }, 60_000);
       return;
     }
@@ -613,7 +741,9 @@ function ensureWsListener(slugRaw, broadcaster_user_id) {
   }).catch(()=>{});
 }
 
-/* ========= Start ========= */
+/* =========================
+ * START
+ * ========================= */
 await loadTokensOnBoot();
 
 app.listen(PORT, () => {
