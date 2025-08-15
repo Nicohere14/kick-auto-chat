@@ -15,13 +15,12 @@ const {
   KICK_REDIRECT_URI,
   ALLOWED_SLUGS = "",
   // Messaging
-  CHAT_MESSAGE = "Cześć czacie! 👋",
+  CHAT_MESSAGE = "Cześć czacie!",
   CHAT_MESSAGES_JSON = "",
   CHAT_MESSAGES_B64 = "",
-  // warianty/anty-duplikaty
+  // anty-duplikaty / warianty
   MSG_NO_REPEAT_COUNT = "8",
-  VARIANT_EMOJIS = "👋,💚,🔥,🙏,🎯,✅,😄,😎",
-  VARIANT_PUNCT = ",!,!!,.,…",
+  VARIANT_PUNCT = ",!,!!,.,…",      // <-- tylko interpunkcja; emoji usunięte
   // harmonogram
   INTERVAL_MINUTES = "5",
   JITTER_SECONDS = "30,60",
@@ -77,8 +76,7 @@ if (!baseMessages.length && CHAT_MESSAGES_JSON) {
 if (!baseMessages.length) baseMessages = [String(CHAT_MESSAGE)];
 console.log(`Loaded ${baseMessages.length} messages from ${source}`);
 
-const puncts = VARIANT_PUNCT.split(",").map(s => s.trim());
-const emojis = VARIANT_EMOJIS.split(",").map(s => s.trim()).filter(Boolean);
+const puncts = VARIANT_PUNCT.split(",").map(s => s.trim()).filter(Boolean);
 
 function shuffle(a){const r=a.slice();for(let i=r.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[r[i],r[j]]=[r[j],r[i]];}return r;}
 function normalizeMsg(s){
@@ -101,13 +99,10 @@ function variate(s){
     const arr=tinySyn.get(key);
     out=arr[Math.floor(Math.random()*arr.length)];
   }
+  // 40% – dodaj drobną interpunkcję (emoji usunięte na życzenie)
   if(puncts.length && Math.random()<0.4){
     const p=puncts[Math.floor(Math.random()*puncts.length)];
-    out=p?`${out}${p}`:out;
-  }
-  if(emojis.length && Math.random()<0.45){
-    const e=emojis[Math.floor(Math.random()*emojis.length)];
-    out=`${out} ${e}`;
+    out=p ? `${out}${p}` : out;
   }
   return out;
 }
@@ -137,9 +132,8 @@ function nextMessageFor(id){
     if(!mem.set.has(norm)){ remember(id,norm); return variant; }
   }
   const fallback=variate(baseMessages[Math.floor(Math.random()*baseMessages.length)]);
-  const withExtra=emojis.length?`${fallback} ${emojis[Math.floor(Math.random()*emojis.length)]}`:fallback;
-  remember(id,normalizeMsg(withExtra));
-  return withExtra;
+  remember(id,normalizeMsg(fallback));
+  return fallback;
 }
 
 /* ===== KV (Upstash REST) ===== */
@@ -178,10 +172,8 @@ async function loadTokensOnBoot() {
 /* PKCE */
 let pkceStore = fs.existsSync(PKCE_FILE) ? JSON.parse(fs.readFileSync(PKCE_FILE, "utf-8")) : {};
 const savePkce = () => fs.writeFileSync(PKCE_FILE, JSON.stringify(pkceStore, null, 2));
-const setPkce = (state, verifier) => { pkceStore[state] = { verifier, ts: Date.now() }; savePkce(); };
-const getPkce = (state) => { const rec = pkceStore[state]; if (!rec) return null; delete pkceStore[state]; savePkce(); return rec.verifier; };
 
-/* ===== App ===== */
+/* ===== Express ===== */
 const app = express();
 app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(bodyParser.urlencoded({ extended: true, verify: (req, res, buf) => { req.rawBody = buf; } }));
@@ -273,7 +265,7 @@ function startPostingLoop(broadcaster_user_id, type = "user") {
   const tick = async () => {
     if (cancelled) return;
     try {
-      const msg = nextMessageFor(broadcaster_user_id);   // <<< NOWE
+      const msg = nextMessageFor(broadcaster_user_id);
       await sendChatMessage({ broadcaster_user_id, content: msg, type });
       console.log(new Date().toISOString(), "sent", { broadcaster_user_id, msg });
     } catch (e) {
@@ -455,7 +447,7 @@ app.get("/admin/send", async (req, res) => {
     if (!ADMIN_KEY || key !== ADMIN_KEY) return res.status(403).send("Forbidden");
 
     const slug = String(req.query.slug || allowedSlugs[0] || "").trim();
-    const msg  = String(req.query.msg  || "TEST 👋").substring(0, 280);
+    const msg  = String(req.query.msg  || "TEST").substring(0, 280);
     if (!slug) return res.status(400).json({ error: "Brak slug" });
     if (!allowedSlugs.includes(slug)) return res.status(403).json({ error: "Slug poza ALLOWED_SLUGS" });
 
@@ -480,7 +472,8 @@ app.get("/admin/peek-refresh", async (req, res) => {
 /* ===== Start ===== */
 await loadTokensOnBoot();
 
-app.listen(PORT, async () => {
+const appInstance = express();
+const server = app.listen(PORT, () => {
   console.log(`kick-auto-chat listening on :${PORT}`);
   setInterval(pollingTick, pollMs);
   pollingTick();
