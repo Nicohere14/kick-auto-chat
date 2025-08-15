@@ -20,7 +20,7 @@ const {
   CHAT_MESSAGES_B64 = "",
   // anty-duplikaty / warianty
   MSG_NO_REPEAT_COUNT = "8",
-  VARIANT_PUNCT = ",!,!!,.,…",      // <-- tylko interpunkcja; emoji usunięte
+  VARIANT_PUNCT = ",!,!!,.,…",      // emoji usunięte na życzenie
   // harmonogram
   INTERVAL_MINUTES = "5",
   JITTER_SECONDS = "30,60",
@@ -35,7 +35,12 @@ const {
   UPSTASH_REDIS_REST_URL = "",
   UPSTASH_REDIS_REST_TOKEN = "",
   // Awaryjny fallback
-  KICK_REFRESH_TOKEN = ""
+  KICK_REFRESH_TOKEN = "",
+  // ECHO spamu z czatu
+  CMD_ECHO_ENABLED = "true",
+  CMD_ECHO_MIN_RUN = "5",
+  CMD_ECHO_COOLDOWN_SECONDS = "60",
+  CMD_ECHO_EXCLUDE = "!points",
 } = process.env;
 
 /* ===== Foldery/pliki ===== */
@@ -99,7 +104,6 @@ function variate(s){
     const arr=tinySyn.get(key);
     out=arr[Math.floor(Math.random()*arr.length)];
   }
-  // 40% – dodaj drobną interpunkcję (emoji usunięte na życzenie)
   if(puncts.length && Math.random()<0.4){
     const p=puncts[Math.floor(Math.random()*puncts.length)];
     out=p ? `${out}${p}` : out;
@@ -169,10 +173,6 @@ async function loadTokensOnBoot() {
   if (!tokens.refresh_token && KICK_REFRESH_TOKEN) tokens.refresh_token = KICK_REFRESH_TOKEN.trim();
 }
 
-/* PKCE */
-let pkceStore = fs.existsSync(PKCE_FILE) ? JSON.parse(fs.readFileSync(PKCE_FILE, "utf-8")) : {};
-const savePkce = () => fs.writeFileSync(PKCE_FILE, JSON.stringify(pkceStore, null, 2));
-
 /* ===== Express ===== */
 const app = express();
 app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
@@ -221,6 +221,7 @@ async function getAppToken() {
 }
 
 /* ===== API helpers ===== */
+const channelIdCache = new Map(); // slug -> id
 async function getChannelsBySlugs(slugs) {
   const list = (Array.isArray(slugs) ? slugs : [slugs]).map(s => String(s || "").trim()).filter(Boolean);
   if (list.length === 0) return [];
@@ -229,23 +230,34 @@ async function getChannelsBySlugs(slugs) {
   const headers = { Authorization: `Bearer ${token}` };
   const timeout = 15000;
 
+  // pojedynczy
   if (list.length === 1) {
     const slug = encodeURIComponent(list[0]);
     try {
       const { data } = await axios.get(`${base}/${slug}`, { headers, timeout });
       const ch = data?.data || data;
-      if (ch) return [ch];
+      if (ch) {
+        channelIdCache.set(ch.slug || list[0], ch.broadcaster_user_id);
+        return [ch];
+      }
     } catch (e) { if (e?.response?.status && e.response.status !== 404) throw e; }
   }
+  // batch
   try {
     const qs = list.map(s => `slug=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qs}`, { headers, timeout });
-    if (Array.isArray(data?.data) && data.data.length) return data.data;
+    if (Array.isArray(data?.data) && data.data.length) {
+      for (const ch of data.data) channelIdCache.set(ch.slug, ch.broadcaster_user_id);
+      return data.data;
+    }
   } catch {}
   try {
     const qsArr = list.map(s => `slug[]=${encodeURIComponent(s)}`).join("&");
     const { data } = await axios.get(`${base}?${qsArr}`, { headers, timeout });
-    if (Array.isArray(data?.data) && data.data.length) return data.data;
+    if (Array.isArray(data?.data) && data.data.length) {
+      for (const ch of data.data) channelIdCache.set(ch.slug, ch.broadcaster_user_id);
+      return data.data;
+    }
   } catch {}
   return [];
 }
@@ -255,6 +267,7 @@ async function sendChatMessage({ broadcaster_user_id, content, type = "user" }) 
   await axios.post("https://api.kick.com/public/v1/chat", {
     broadcaster_user_id, content, type
   }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
+  markEchoSent(broadcaster_user_id, content);
 }
 
 /* ===== Pętla wysyłek ===== */
@@ -313,25 +326,114 @@ function verifyWebhookSignature(req) {
   } catch (e) { console.error("Signature verify error:", e.message); return false; }
 }
 
+/* ===== ECHO spamu: stan i pomocnicze ===== */
+const echoEnabled = String(CMD_ECHO_ENABLED).toLowerCase() === "true";
+const echoMinRun = Math.max(2, Number(CMD_ECHO_MIN_RUN) || 5);
+const echoCooldownMs = Math.max(5, Number(CMD_ECHO_COOLDOWN_SECONDS) || 60) * 1000;
+const echoExclude = new Set(
+  (CMD_ECHO_EXCLUDE || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean)
+);
+
+// per kanał: sekwencja identycznych komend i znacznik ostatniego wysłania
+const echoStateByChannel = new Map(); // id -> { current: "!cmd", count: n, lastSentAt: ts }
+// cache ostatnio wysłanych przez bota, żeby nie reagować na samego siebie
+const echoRecentSent = new Map(); // id -> Map<content, ts>
+function markEchoSent(id, content) {
+  const map = echoRecentSent.get(id) || new Map();
+  map.set(content, Date.now());
+  // sprzątaj
+  for (const [msg, ts] of map) if (Date.now() - ts > 30_000) map.delete(msg);
+  echoRecentSent.set(id, map);
+}
+function wasEchoSentRecently(id, content) {
+  const m = echoRecentSent.get(id);
+  if (!m) return false;
+  const ts = m.get(content);
+  return ts && (Date.now() - ts) < 30_000; // 30s
+}
+
 /* ===== ROUTES ===== */
 
-// Webhook: start/stop pętli
+// Webhook: start/stop pętli + echo spamu
 app.post("/webhook", async (req, res) => {
   try {
     await getKickPublicKey();
     if (!verifyWebhookSignature(req)) return res.status(401).send("Invalid signature");
+
     const eventType = req.get("Kick-Event-Type");
+
+    // LIVE on/off
     if (eventType === "livestream.status.updated") {
       const { broadcaster, is_live } = req.body || {};
       const id = broadcaster?.user_id;
       const slug = broadcaster?.channel_slug;
-      if (!id) return res.sendStatus(204);
-      if (!allowedSlugs.includes(String(slug))) return res.sendStatus(204);
-      if (is_live) startPostingLoop(id); else stopPostingLoop(id);
+      if (id && allowedSlugs.includes(String(slug))) {
+        if (is_live) startPostingLoop(id); else stopPostingLoop(id);
+      }
+      return res.sendStatus(200);
     }
+
+    // Chat messages (echo)
+    if (eventType === "chat.message.created" && echoEnabled) {
+      // próbujemy wyciągnąć content + slug + id z różnych możliwych pól
+      const payload = req.body || {};
+      const content =
+        (payload.message?.content ?? payload.data?.message?.content ?? payload.data?.content ?? payload.content ?? "")
+          .toString()
+          .trim();
+      const slug =
+        (payload.broadcaster?.channel_slug ?? payload.channel?.slug ?? payload.data?.channel?.slug ?? "")
+          .toString()
+          .trim();
+
+      if (!content || !slug || !allowedSlugs.includes(slug)) return res.sendStatus(200);
+
+      const msgLower = content.toLowerCase();
+
+      // tylko komendy zaczynające się od "!"
+      if (!msgLower.startsWith("!")) return res.sendStatus(200);
+      // wykluczenia (np. !points)
+      if (echoExclude.has(msgLower)) return res.sendStatus(200);
+
+      // ustal broadcaster_user_id (spróbuj z cache, w razie czego pobierz)
+      let broadcaster_user_id = payload.broadcaster?.user_id || channelIdCache.get(slug);
+      if (!broadcaster_user_id) {
+        const ch = await getChannelsBySlugs([slug]);
+        broadcaster_user_id = ch?.[0]?.broadcaster_user_id;
+        if (!broadcaster_user_id) return res.sendStatus(200);
+      }
+
+      // ignoruj własne świeże wysyłki (żeby nie robić echa na sobie)
+      if (wasEchoSentRecently(broadcaster_user_id, content)) return res.sendStatus(200);
+
+      // zliczanie sekwencji identycznych komend
+      const st = echoStateByChannel.get(broadcaster_user_id) || { current: "", count: 0, lastSentAt: 0 };
+      if (st.current === msgLower) {
+        st.count += 1;
+      } else {
+        st.current = msgLower;
+        st.count = 1;
+      }
+
+      const now = Date.now();
+      if (st.count >= echoMinRun && (now - st.lastSentAt) > echoCooldownMs) {
+        try {
+          await sendChatMessage({ broadcaster_user_id, content, type: "user" });
+          st.lastSentAt = now;
+          // po wysłaniu zerujemy licznik, żeby czekać na kolejną sekwencję
+          st.count = 0;
+        } catch (e) {
+          // cicho — echo jest opcjonalne
+        }
+      }
+      echoStateByChannel.set(broadcaster_user_id, st);
+      return res.sendStatus(200);
+    }
+
     res.sendStatus(200);
   } catch (e) {
-    console.error("Webhook error:", e.message); res.sendStatus(500);
+    console.error("Webhook error:", e.message);
+    res.sendStatus(500);
   }
 });
 
@@ -404,12 +506,15 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-// Subskrypcja eventów (POST)
+// Subskrypcja eventów (POST) – rejestrujemy 2 typy: live + chat.message.created
 app.post("/subscribe", async (req, res) => {
   try {
     const token = await refreshIfNeeded();
     const { data } = await axios.post("https://api.kick.com/public/v1/events/subscriptions", {
-      events: [{ name: "livestream.status.updated", version: 1 }],
+      events: [
+        { name: "livestream.status.updated", version: 1 },
+        { name: "chat.message.created",      version: 1 },
+      ],
       method: "webhook"
     }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
     res.json({ ok: true, created: data?.data || null });
@@ -428,7 +533,10 @@ app.get("/subscribe", async (req, res) => {
     }
     const token = await refreshIfNeeded();
     const { data } = await axios.post("https://api.kick.com/public/v1/events/subscriptions", {
-      events: [{ name: "livestream.status.updated", version: 1 }],
+      events: [
+        { name: "livestream.status.updated", version: 1 },
+        { name: "chat.message.created",      version: 1 },
+      ],
       method: "webhook"
     }, { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 });
     res.json({ ok: true, created: data?.data || null });
@@ -472,8 +580,7 @@ app.get("/admin/peek-refresh", async (req, res) => {
 /* ===== Start ===== */
 await loadTokensOnBoot();
 
-const appInstance = express();
-const server = app.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`kick-auto-chat listening on :${PORT}`);
   setInterval(pollingTick, pollMs);
   pollingTick();
