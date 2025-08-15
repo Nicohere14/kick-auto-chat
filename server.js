@@ -17,23 +17,29 @@ const {
   // Messaging
   CHAT_MESSAGE = "Cześć czacie! 👋",
   CHAT_MESSAGES_JSON = "",
+  CHAT_MESSAGES_B64 = "",
+  // warianty/anty-duplikaty
+  MSG_NO_REPEAT_COUNT = "8",
+  VARIANT_EMOJIS = "👋,💚,🔥,🙏,🎯,✅,😄,😎",
+  VARIANT_PUNCT = ",!,!!,.,…",
+  // harmonogram
   INTERVAL_MINUTES = "5",
   JITTER_SECONDS = "30,60",
   POLL_SECONDS = "60",
   VERIFY_WEBHOOK_SIGNATURE = "false",
-  // Admin / opcje
+  // Admin
   ADMIN_KEY = "",
   SUBSCRIBE_KEY = "",
-  // Pliki pomocnicze (PKCE, backup)
+  // Pliki pomocnicze
   DATA_DIR = ".",
   // KV (Upstash REST)
   UPSTASH_REDIS_REST_URL = "",
   UPSTASH_REDIS_REST_TOKEN = "",
-  // Opcjonalny awaryjny backup
+  // Awaryjny fallback
   KICK_REFRESH_TOKEN = ""
 } = process.env;
 
-/* ===== Folder na pliki pomocnicze ===== */
+/* ===== Foldery/pliki ===== */
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const TOKENS_FILE = path.join(DATA_DIR, "tokens.json");
 const PKCE_FILE   = path.join(DATA_DIR, "pkce.json");
@@ -48,23 +54,96 @@ const jitterMs = () =>
   (Math.floor(Math.random() * (Math.max(jMin, jMax) - Math.min(jMin, jMax) + 1)) + Math.min(jMin, jMax)) * 1000;
 const pollMs = Math.max(30, Number(POLL_SECONDS)) * 1000;
 
-/* ===== Wiadomości (rotacja) ===== */
-let chatMessages = [];
-try {
-  if (CHAT_MESSAGES_JSON) {
-    const arr = JSON.parse(CHAT_MESSAGES_JSON);
-    if (Array.isArray(arr) && arr.length) chatMessages = arr.map(String);
-  }
-} catch (e) {
-  console.warn("CHAT_MESSAGES_JSON parse error:", e.message);
+/* ===== Wiadomości: B64/JSON + shuffle + anty-duplikaty ===== */
+function decodeB64Lines(b64) {
+  try {
+    const raw = Buffer.from(b64, "base64").toString("utf-8");
+    return raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  } catch { return []; }
 }
-if (chatMessages.length === 0) chatMessages = [CHAT_MESSAGE];
-let msgIndex = 0;
-const nextMessage = () => chatMessages[(msgIndex++) % chatMessages.length];
 
-/* ===== KV (Upstash REST) helpery ===== */
+let baseMessages = [];
+let source = "CHAT_MESSAGE";
+if (CHAT_MESSAGES_B64) {
+  baseMessages = decodeB64Lines(CHAT_MESSAGES_B64);
+  source = "CHAT_MESSAGES_B64";
+}
+if (!baseMessages.length && CHAT_MESSAGES_JSON) {
+  try {
+    const arr = JSON.parse(CHAT_MESSAGES_JSON);
+    if (Array.isArray(arr) && arr.length) { baseMessages = arr.map(String); source = "CHAT_MESSAGES_JSON"; }
+  } catch { console.warn("CHAT_MESSAGES_JSON parse error – pomijam."); }
+}
+if (!baseMessages.length) baseMessages = [String(CHAT_MESSAGE)];
+console.log(`Loaded ${baseMessages.length} messages from ${source}`);
+
+const puncts = VARIANT_PUNCT.split(",").map(s => s.trim());
+const emojis = VARIANT_EMOJIS.split(",").map(s => s.trim()).filter(Boolean);
+
+function shuffle(a){const r=a.slice();for(let i=r.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[r[i],r[j]]=[r[j],r[i]];}return r;}
+function normalizeMsg(s){
+  let t=s.toLowerCase();
+  t=t.replace(/[:][a-z0-9_]+:?/gi,"");   // emotes typu :points
+  t=t.replace(/[^\p{L}\p{N}]+/gu,"");    // znaki nie-alfanum.
+  t=t.replace(/(.)\1{2,}/g,"$1$1");      // xddddd -> xdd
+  return t.trim();
+}
+const tinySyn=new Map([
+  ["xd",["xd","xD","XD","XDD"]],
+  ["gg",["gg","GG","gg!"]],
+  ["wp",["wp","WP"]],
+  ["kekw",["KEKW","kekw"]],
+]);
+function variate(s){
+  let out=s;
+  const key=normalizeMsg(s);
+  if(tinySyn.has(key)){
+    const arr=tinySyn.get(key);
+    out=arr[Math.floor(Math.random()*arr.length)];
+  }
+  if(puncts.length && Math.random()<0.4){
+    const p=puncts[Math.floor(Math.random()*puncts.length)];
+    out=p?`${out}${p}`:out;
+  }
+  if(emojis.length && Math.random()<0.45){
+    const e=emojis[Math.floor(Math.random()*emojis.length)];
+    out=`${out} ${e}`;
+  }
+  return out;
+}
+
+const noRepeatCount=Math.max(2,Number(MSG_NO_REPEAT_COUNT)||8);
+const recentByChannel=new Map();  // id -> {list,set}
+const bagByChannel=new Map();     // id -> [msgs]
+
+function getRecent(id){ if(!recentByChannel.has(id)) recentByChannel.set(id,{list:[],set:new Set()}); return recentByChannel.get(id); }
+function remember(id,norm){
+  const mem=getRecent(id);
+  if(!mem.set.has(norm)){ mem.list.push(norm); mem.set.add(norm);
+    while(mem.list.length>noRepeatCount){ const old=mem.list.shift(); mem.set.delete(old); }
+  }
+}
+function nextFromBag(id){
+  let bag=bagByChannel.get(id);
+  if(!bag || !bag.length){ bag=shuffle(baseMessages); bagByChannel.set(id,bag); }
+  return bag.shift();
+}
+function nextMessageFor(id){
+  for(let i=0;i<baseMessages.length+3;i++){
+    const raw=nextFromBag(id) || baseMessages[Math.floor(Math.random()*baseMessages.length)];
+    const variant=variate(raw);
+    const norm=normalizeMsg(variant);
+    const mem=getRecent(id);
+    if(!mem.set.has(norm)){ remember(id,norm); return variant; }
+  }
+  const fallback=variate(baseMessages[Math.floor(Math.random()*baseMessages.length)]);
+  const withExtra=emojis.length?`${fallback} ${emojis[Math.floor(Math.random()*emojis.length)]}`:fallback;
+  remember(id,normalizeMsg(withExtra));
+  return withExtra;
+}
+
+/* ===== KV (Upstash REST) ===== */
 const TOKENS_KV_KEY = "kick_tokens_v1";
-
 async function kvGet(key) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
   const r = await fetch(`${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
@@ -85,41 +164,22 @@ async function kvSet(key, obj) {
 
 /* ===== Tokeny / PKCE ===== */
 let tokens = { access_token: null, refresh_token: null, expires_at: 0 };
-function saveTokensToFile() {
-  try { fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2)); } catch {}
-}
-async function saveTokensEverywhere() {
-  saveTokensToFile();
-  await kvSet(TOKENS_KV_KEY, tokens);
-}
+function saveTokensToFile() { try { fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2)); } catch {} }
+async function saveTokensEverywhere() { saveTokensToFile(); await kvSet(TOKENS_KV_KEY, tokens); }
 async function loadTokensOnBoot() {
-  // 1) Priorytet: KV
   const fromKv = await kvGet(TOKENS_KV_KEY);
   if (fromKv && fromKv.refresh_token) { tokens = fromKv; return; }
-  // 2) Backup: plik
   if (fs.existsSync(TOKENS_FILE)) {
-    try {
-      const f = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"));
-      if (f?.refresh_token) tokens = f;
-    } catch {}
+    try { const f = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8")); if (f?.refresh_token) tokens = f; } catch {}
   }
-  // 3) Awaryjny ENV
-  if (!tokens.refresh_token && KICK_REFRESH_TOKEN) {
-    tokens.refresh_token = KICK_REFRESH_TOKEN.trim();
-  }
+  if (!tokens.refresh_token && KICK_REFRESH_TOKEN) tokens.refresh_token = KICK_REFRESH_TOKEN.trim();
 }
 
-/* PKCE (persist) */
+/* PKCE */
 let pkceStore = fs.existsSync(PKCE_FILE) ? JSON.parse(fs.readFileSync(PKCE_FILE, "utf-8")) : {};
 const savePkce = () => fs.writeFileSync(PKCE_FILE, JSON.stringify(pkceStore, null, 2));
 const setPkce = (state, verifier) => { pkceStore[state] = { verifier, ts: Date.now() }; savePkce(); };
-const getPkce = (state) => {
-  const rec = pkceStore[state];
-  if (!rec) return null;
-  delete pkceStore[state];
-  savePkce();
-  return rec.verifier;
-};
+const getPkce = (state) => { const rec = pkceStore[state]; if (!rec) return null; delete pkceStore[state]; savePkce(); return rec.verifier; };
 
 /* ===== App ===== */
 const app = express();
@@ -143,7 +203,7 @@ async function refreshIfNeeded() {
   });
 
   tokens.access_token = data.access_token;
-  tokens.refresh_token = data.refresh_token; // ROTACJA!
+  tokens.refresh_token = data.refresh_token;
   tokens.expires_at = Math.floor(Date.now()/1000) + (data.expires_in || 3600);
   await saveTokensEverywhere();
   return tokens.access_token;
@@ -213,7 +273,7 @@ function startPostingLoop(broadcaster_user_id, type = "user") {
   const tick = async () => {
     if (cancelled) return;
     try {
-      const msg = nextMessage();
+      const msg = nextMessageFor(broadcaster_user_id);   // <<< NOWE
       await sendChatMessage({ broadcaster_user_id, content: msg, type });
       console.log(new Date().toISOString(), "sent", { broadcaster_user_id, msg });
     } catch (e) {
@@ -366,7 +426,7 @@ app.post("/subscribe", async (req, res) => {
   }
 });
 
-// Opcjonalny GET-fallback do klikania w przeglądarce
+// GET-fallback do klikania w przeglądarce
 app.get("/subscribe", async (req, res) => {
   try {
     if (SUBSCRIBE_KEY) {
@@ -388,7 +448,7 @@ app.get("/subscribe", async (req, res) => {
 // Health
 app.get("/health", (req, res) => res.send("ok"));
 
-/* ===== Admin: wysyłka testowa ===== */
+/* ===== Admin ===== */
 app.get("/admin/send", async (req, res) => {
   try {
     const key = req.query.key || req.get("X-Admin-Key");
@@ -410,17 +470,14 @@ app.get("/admin/send", async (req, res) => {
   }
 });
 
-/* ===== Admin: podejrzyj refresh (jednorazowo, z kluczem) ===== */
 app.get("/admin/peek-refresh", async (req, res) => {
   try {
     if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).send("Forbidden");
     return res.json({ refresh_token: tokens?.refresh_token || null });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ===== Start serwera ===== */
+/* ===== Start ===== */
 await loadTokensOnBoot();
 
 app.listen(PORT, async () => {
