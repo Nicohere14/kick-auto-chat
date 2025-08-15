@@ -8,7 +8,7 @@ import path from "path";
 import { io } from "socket.io-client";
 
 /* =========================
- * UA / nagłówki „jak przeglądarka” (obchodzą 403)
+ * UA / nagłówki „jak przeglądarka”
  * ========================= */
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -69,7 +69,21 @@ const {
   CMD_ECHO_MIN_RUN = "5",
   CMD_ECHO_COOLDOWN_SECONDS = "60",
   CMD_ECHO_EXCLUDE = "!points",
+
+  // NOWE: ręczne nadpisanie chatroom_id (np. "rybsonlol:2968509,holly-s:123456")
+  CHATROOM_ID_OVERRIDES = "",
 } = process.env;
+
+/* ---- Parsowanie CHATROOM_ID_OVERRIDES ---- */
+const CHATROOM_OVERRIDES = String(CHATROOM_ID_OVERRIDES || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .reduce((acc, pair) => {
+    const [slug, id] = pair.split(":").map((x) => (x || "").trim());
+    if (slug && id && /^\d+$/.test(id)) acc[slug.toLowerCase()] = Number(id);
+    return acc;
+  }, {});
 
 /* =========================
  * STORAGE
@@ -745,12 +759,20 @@ app.get("/admin/debug-chatroom", async (req, res) => {
 });
 
 /* =========================
- * WS CZATU – pobieranie chatroom_id (UA + regex + HTML)
+ * WS CZATU – override + pobieranie chatroom_id
  * ========================= */
 const wsBySlug = new Map();
 const missingChatLogOnce = new Set();
 
 async function getChannelWithChatroom(slug) {
+  // 0) NAJPIERW: override z ENV – omija 403/WAF i nie pyta Kicka
+  const ov = CHATROOM_OVERRIDES[slug];
+  if (ov) {
+    let ch = (await getChannelsBySlugs([slug]))?.[0] || null;
+    if (!ch) ch = { slug, broadcaster_user_id: channelIdCache.get(slug) ?? null };
+    return { ch, chatroom_id: ov };
+  }
+
   let ch = null;
   let chatroom_id = null;
 
