@@ -1,17 +1,20 @@
 {
   "name": "kick-auto-chat",
   "version": "1.0.0",
+  "description": "Auto chat bot for Kick: OAuth + webhook (LIVE), WS echo spamu, cykliczne wiadomości.",
   "private": true,
   "type": "module",
-  "license": "MIT",
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
+    "axios": "^1.7.4",
     "body-parser": "^1.20.2",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "socket.io-client": "^4.7.5"
   }
 }
