@@ -48,6 +48,10 @@ const {
   JITTER_SECONDS = "30,60",
   POLL_SECONDS = "60",
 
+  // NOWE: losowy zakres (minuty) – nadpisuje fallback gdy ustawione
+  RAND_MIN_MINUTES = "",
+  RAND_MAX_MINUTES = "",
+
   // Webhook security
   VERIFY_WEBHOOK_SIGNATURE = "false",
 
@@ -105,6 +109,25 @@ const jMin = Math.abs(Number(jMinRaw || 30));
 const jMax = Math.abs(Number(jMaxRaw || 60));
 const jitterMs = () =>
   (Math.floor(Math.random() * (Math.max(jMin, jMax) - Math.min(jMin, jMax) + 1)) + Math.min(jMin, jMax)) * 1000;
+
+
+// === Losowy harmonogram ===
+// Jeśli ustawione RAND_* → używamy PRAWDZIWEGO randomu (min..max minut).
+// W przeciwnym razie fallback: INTERVAL_MINUTES + JITTER_SECONDS.
+const useRandInterval = String(RAND_MIN_MINUTES).trim() !== "" && String(RAND_MAX_MINUTES).trim() !== "";
+function nextDelayMs() {
+  if (useRandInterval) {
+    const lo = Math.min(Number(RAND_MIN_MINUTES) || 0, Number(RAND_MAX_MINUTES) || 0);
+    const hi = Math.max(Number(RAND_MIN_MINUTES) || 0, Number(RAND_MAX_MINUTES) || 0);
+    const secs = Math.floor(Math.random() * ((hi * 60) - (lo * 60) + 1)) + (lo * 60);
+    const ms = secs * 1000;
+    console.log(`Next message in ~${(ms / 60000).toFixed(1)} min`);
+    return ms;
+  }
+  const ms = intervalMs + jitterMs();
+  console.log(`Next message in ~${(ms / 60000).toFixed(1)} min (fallback interval+jitter)`);
+  return ms;
+}
 
 const pollMs = Math.max(30, Number(POLL_SECONDS)) * 1000;
 
@@ -429,12 +452,12 @@ function startPostingLoop(broadcaster_user_id, type = "user") {
         return;
       }
     } finally {
-      if (!cancelled) setTimeout(tick, intervalMs + jitterMs());
+      if (!cancelled) setTimeout(tick, nextDelayMs());
     }
   };
 
   postingLoops.set(broadcaster_user_id, { cancel: () => (cancelled = true) });
-  setTimeout(tick, 10_000 + jitterMs());
+  setTimeout(tick, nextDelayMs());
   console.log("Posting loop START", broadcaster_user_id);
 
   const slug =
